@@ -50,7 +50,6 @@ int volumeIndex = 0;
 int smoothVolumeIndex = 0;
 unsigned long lastCalibration = 0;
 float smoothVolumePeak = 0;  // Track the highest smoothed volume
-float adaptiveMaxVolume = MAX_VOLUME_TARGET;  // Dynamic max volume target
 
 // LED FX engine
 WS2812FX ws2812fx = WS2812FX(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -328,25 +327,9 @@ void loop() {
       float calibrationPeak = max(maxSmoothDetected, smoothVolumePeak * 0.8f);
       
       if (calibrationPeak > MIN_VOLUME) {
-        // Adaptive max volume: aim for 80% utilization of LED range
-        float targetMaxVolume = calibrationPeak * 1.25f;  // 25% headroom
-        
-        // Smoothly adjust adaptive max volume
-        adaptiveMaxVolume = (adaptiveMaxVolume * 0.6f) + (targetMaxVolume * 0.4f);
-        
-        // Ensure adaptive max doesn't go below a reasonable minimum
-        adaptiveMaxVolume = max(adaptiveMaxVolume, MIN_VOLUME * 3.0f);
-        
-        // Also ensure it doesn't grow too large
-        adaptiveMaxVolume = min(adaptiveMaxVolume, MAX_VOLUME_TARGET * 2.0f);
-        
-        // Update maxVolume for plotter display
-        maxVolume = adaptiveMaxVolume;
-        
         Serial.print("Calibration - Peak: ");
         Serial.print(calibrationPeak);
-        Serial.print(", Adaptive Max: ");
-        Serial.println(adaptiveMaxVolume);
+        Serial.println("");
       }
       
       // Decay the peak slightly over time to allow for re-calibration
@@ -364,8 +347,6 @@ void loop() {
     Serial.print(smoothVolume);
     Serial.print(",SmoothPeak:");
     Serial.print(smoothVolumePeak);
-    Serial.print(",AdaptiveMax:");
-    Serial.print(adaptiveMaxVolume);
     Serial.print(",MaxRange:");
     Serial.println(10000);
     
