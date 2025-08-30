@@ -1,0 +1,7 @@
+---
+description: Git rules
+globs:
+alwaysApply: true
+---
+
+- Write descriptive commits that explin the changes.

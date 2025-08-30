@@ -43,39 +43,17 @@ float dynamicScaleFactor = 2.0;  // Adjusted every 5 seconds
 // Dynamic calibration (5 seconds)
 #define CALIBRATION_WINDOW 5000
 #define VOLUME_SAMPLES 500
+#define SMOOTH_VOLUME_SAMPLES 100  // Track smoothed volume peaks
 float rawVolumeHistory[VOLUME_SAMPLES];
+float smoothVolumeHistory[SMOOTH_VOLUME_SAMPLES];
 int volumeIndex = 0;
+int smoothVolumeIndex = 0;
 unsigned long lastCalibration = 0;
-
-// Peak averaging for stable max range
-#define PEAK_HISTORY_SIZE 10
-float peakHistory[PEAK_HISTORY_SIZE];
-int peakIndex = 0;
-int peakCount = 0;
+float smoothVolumePeak = 0;  // Track the highest smoothed volume
+float adaptiveMaxVolume = MAX_VOLUME_TARGET;  // Dynamic max volume target
 
 // LED FX engine
 WS2812FX ws2812fx = WS2812FX(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// ===============================
-// PEAK AVERAGING
-// ===============================
-void addPeakToHistory(float peak) {
-  peakHistory[peakIndex] = peak;
-  peakIndex = (peakIndex + 1) % PEAK_HISTORY_SIZE;
-  if (peakCount < PEAK_HISTORY_SIZE) {
-    peakCount++;
-  }
-}
-
-float getAveragePeak() {
-  if (peakCount == 0) return 0;
-  
-  float sum = 0;
-  for (int i = 0; i < peakCount; i++) {
-    sum += peakHistory[i];
-  }
-  return sum / peakCount;
-}
 
 // ===============================
 // CALIBRATION
@@ -176,12 +154,12 @@ void updateLedsByVolume() {
 
   int numLedsToLight = 0;
 
-  if (smoothVolume > MIN_VOLUME) {
-    // Map volume to LED count
-    if (smoothVolume >= MAX_VOLUME_TARGET * 0.95f) {
-      numLedsToLight = LED_COUNT;  // Full LEDs at 95% of max
+  if (smoothVolume > MIN_VOLUME && smoothVolumePeak > MIN_VOLUME) {
+    // Map volume to LED count using actual smoothed volume peak
+    if (smoothVolume >= smoothVolumePeak * 0.95f) {
+      numLedsToLight = LED_COUNT;  // Full LEDs at 95% of observed peak
     } else {
-      float normalized = (smoothVolume - MIN_VOLUME) / (MAX_VOLUME_TARGET - MIN_VOLUME);
+      float normalized = (smoothVolume - MIN_VOLUME) / (smoothVolumePeak - MIN_VOLUME);
       normalized = pow(normalized, 0.7f);  // Gentle curve
       numLedsToLight = constrain(round(normalized * LED_COUNT), 1, LED_COUNT);
     }
@@ -223,14 +201,12 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // Initialize volume history array
+  // Initialize volume history arrays
   for (int i = 0; i < VOLUME_SAMPLES; i++) {
     rawVolumeHistory[i] = 0;
   }
-  
-  // Initialize peak history array
-  for (int i = 0; i < PEAK_HISTORY_SIZE; i++) {
-    peakHistory[i] = 0;
+  for (int i = 0; i < SMOOTH_VOLUME_SAMPLES; i++) {
+    smoothVolumeHistory[i] = 0;
   }
 
   ws2812fx.init();
@@ -319,9 +295,18 @@ void loop() {
       
       smoothVolume = (smoothVolume * (1.0 - SMOOTHING_FACTOR)) + (volume * SMOOTHING_FACTOR);
       
+      // Track smoothed volume peak
+      if (smoothVolume > smoothVolumePeak) {
+        smoothVolumePeak = smoothVolume;
+      }
+      
       // Store for dynamic calibration
       rawVolumeHistory[volumeIndex] = calibratedVolume;
       volumeIndex = (volumeIndex + 1) % VOLUME_SAMPLES;
+      
+      // Store smoothed volume for peak analysis
+      smoothVolumeHistory[smoothVolumeIndex] = smoothVolume;
+      smoothVolumeIndex = (smoothVolumeIndex + 1) % SMOOTH_VOLUME_SAMPLES;
     }
   }
 
@@ -329,28 +314,43 @@ void loop() {
   if (now - lastUpdate > UPDATE_INTERVAL) {
     updateLedsByVolume();
     
-    // Recalibrate scale factor every 5 seconds
+    // Recalibrate based on smoothed volume peaks every 5 seconds
     if (now - lastCalibration >= CALIBRATION_WINDOW) {
-      // Find current peak in this window
-      float currentMaxDetected = 0;
-      for (int i = 0; i < VOLUME_SAMPLES; i++) {
-        if (rawVolumeHistory[i] > currentMaxDetected) {
-          currentMaxDetected = rawVolumeHistory[i];
+      // Find peak smoothed volume in recent history
+      float maxSmoothDetected = 0;
+      for (int i = 0; i < SMOOTH_VOLUME_SAMPLES; i++) {
+        if (smoothVolumeHistory[i] > maxSmoothDetected) {
+          maxSmoothDetected = smoothVolumeHistory[i];
         }
       }
       
-      // Add this peak to our history (only if it's a meaningful peak)
-      if (currentMaxDetected > baselineNoise * 2) {  // Only add significant peaks
-        addPeakToHistory(currentMaxDetected);
+      // Use the higher of recent peak or overall peak for calibration
+      float calibrationPeak = max(maxSmoothDetected, smoothVolumePeak * 0.8f);
+      
+      if (calibrationPeak > MIN_VOLUME) {
+        // Adaptive max volume: aim for 80% utilization of LED range
+        float targetMaxVolume = calibrationPeak * 1.25f;  // 25% headroom
+        
+        // Smoothly adjust adaptive max volume
+        adaptiveMaxVolume = (adaptiveMaxVolume * 0.6f) + (targetMaxVolume * 0.4f);
+        
+        // Ensure adaptive max doesn't go below a reasonable minimum
+        adaptiveMaxVolume = max(adaptiveMaxVolume, MIN_VOLUME * 3.0f);
+        
+        // Also ensure it doesn't grow too large
+        adaptiveMaxVolume = min(adaptiveMaxVolume, MAX_VOLUME_TARGET * 2.0f);
+        
+        // Update maxVolume for plotter display
+        maxVolume = adaptiveMaxVolume;
+        
+        Serial.print("Calibration - Peak: ");
+        Serial.print(calibrationPeak);
+        Serial.print(", Adaptive Max: ");
+        Serial.println(adaptiveMaxVolume);
       }
       
-      // Use average of recent peaks for scaling instead of single max
-      float averagePeak = getAveragePeak();
-      if (averagePeak > 0) {
-        float newScale = MAX_VOLUME_TARGET / averagePeak;
-        dynamicScaleFactor = (dynamicScaleFactor * 0.8) + (newScale * 0.2);  // Even smoother transition
-        maxVolume = averagePeak * dynamicScaleFactor;  // Update max for plotter
-      }
+      // Decay the peak slightly over time to allow for re-calibration
+      smoothVolumePeak *= 0.95f;
       
       lastCalibration = now;
     }
@@ -358,14 +358,16 @@ void loop() {
     // Serial plotter output
     Serial.print("MinRange:");
     Serial.print(-1000);
-    Serial.print("Volume:");
+    Serial.print(",Volume:");
     Serial.print(volume);
     Serial.print(",SmoothVolume:");
     Serial.print(smoothVolume);
-    Serial.print(",MaxVolume:");
-    Serial.print(maxVolume);
+    Serial.print(",SmoothPeak:");
+    Serial.print(smoothVolumePeak);
+    Serial.print(",AdaptiveMax:");
+    Serial.print(adaptiveMaxVolume);
     Serial.print(",MaxRange:");
-    Serial.println(5000);
+    Serial.println(10000);
     
     lastUpdate = now;
   }
