@@ -348,7 +348,7 @@ void loop() {
     Serial.print(",SmoothPeak:");
     Serial.print(smoothVolumePeak);
     Serial.print(",MaxRange:");
-    Serial.println(10000);
+    Serial.println(4000);
     
     lastUpdate = now;
   }
